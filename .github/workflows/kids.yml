@@ -1,0 +1,130 @@
+name: Kids YouTube Automation
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 12 * * *"
+
+jobs:
+  create-video:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          pip install edge-tts pillow google-api-python-client google-auth google-auth-oauthlib google-auth-httplib2
+
+      - name: Create video
+        env:
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+        run: |
+          cat > make_video.py <<'PY'
+          import asyncio
+          import edge_tts
+          from PIL import Image, ImageDraw
+          import subprocess
+          import os
+
+          story = """एक बार एक छोटा खरगोश जंगल में रहता था।
+          वह बहुत मेहनती और ईमानदार था।
+          एक दिन उसे रास्ते में एक चमकता हुआ सिक्का मिला।
+          खरगोश ने सोचा कि यह किसी का होगा।
+          उसने जंगल के सभी जानवरों से पूछा।
+          आखिरकार एक बूढ़े कछुए ने बताया कि सिक्का उसका है।
+          खरगोश ने सिक्का वापस कर दिया।
+          कछुआ बहुत खुश हुआ और बोला कि ईमानदारी सबसे बड़ी अच्छाई है।
+          सीख: हमेशा ईमानदार रहना चाहिए।"""
+
+          async def voice():
+              communicate = edge_tts.Communicate(
+                  story,
+                  "hi-IN-SwaraNeural"
+              )
+              await communicate.save("voice.mp3")
+
+          asyncio.run(voice())
+
+          img = Image.new("RGB", (1280,720), "white")
+          draw = ImageDraw.Draw(img)
+
+          draw.text(
+              (120,250),
+              "ईमानदार खरगोश",
+              fill="black"
+          )
+
+          img.save("cover.png")
+
+          subprocess.run([
+              "ffmpeg","-y",
+              "-loop","1",
+              "-i","cover.png",
+              "-i","voice.mp3",
+              "-c:v","libx264",
+              "-tune","stillimage",
+              "-c:a","aac",
+              "-b:a","128k",
+              "-pix_fmt","yuv420p",
+              "-shortest",
+              "kids-story.mp4"
+          ])
+
+          print("Video created successfully")
+          PY
+
+          python make_video.py
+
+      - name: Upload to YouTube
+        env:
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+        run: |
+          cat > upload.py <<'PY'
+          import os
+          from google.oauth2.credentials import Credentials
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+          credentials = Credentials(
+              None,
+              refresh_token=os.environ["YOUTUBE_REFRESH_TOKEN"],
+              token_uri="https://oauth2.googleapis.com/token",
+              client_id=os.environ["YOUTUBE_CLIENT_ID"],
+              client_secret=os.environ["YOUTUBE_CLIENT_SECRET"],
+              scopes=["https://www.googleapis.com/auth/youtube.upload"]
+          )
+
+          youtube = build("youtube", "v3", credentials=credentials)
+
+          request = youtube.videos().insert(
+              part="snippet,status",
+              body={
+                  "snippet": {
+                      "title": "ईमानदार खरगोश | बच्चों की हिंदी कहानी",
+                      "description": "बच्चों के लिए प्यारी हिंदी कहानी।",
+                      "tags": ["kids", "hindi story", "moral story"]
+                  },
+                  "status": {
+                      "privacyStatus": "private",
+                      "selfDeclaredMadeForKids": True
+                  }
+              },
+              media_body=MediaFileUpload(
+                  "kids-story.mp4",
+                  mimetype="video/mp4"
+              )
+          )
+
+          response = request.execute()
+          print("Uploaded:", response["id"])
+          PY
+
+          python upload.py
